@@ -2,13 +2,19 @@ import sounddevice as sd
 import numpy as np
 from scipy.signal import sosfilt, sosfreqz
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import queue
+import sys
 
 INPUT_DEVICE = 0   # BlackHole 2ch
 OUTPUT_DEVICE = 2  # MacBook Pro Speakers
 
 SAMPLERATE = 48000
 CHANNELS = 2
-BLOCKSIZE = 512
+BLOCKSIZE = 4096  # Increased for better FFT resolution
+
+# Queue for passing audio data to the plotter
+plot_queue = queue.Queue()
 
 
 class ParametricEQBand:
@@ -134,39 +140,6 @@ class ParametricEQ:
         magnitude_db = 20 * np.log10(np.abs(h) + 1e-10)
         return w, magnitude_db
     
-    def plot_response(self, save_path: str = None):
-        """Save the EQ frequency response plot to a file."""
-        freqs, magnitude_db = self.get_frequency_response(2048)
-        
-        plt.figure(figsize=(10, 5))
-        plt.semilogx(freqs, magnitude_db, 'b-', linewidth=2)
-        plt.xlim(20, self.samplerate / 2)
-        plt.ylim(-24, 24)
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Gain (dB)')
-        plt.title('Parametric EQ Frequency Response')
-        plt.grid(True, which='both', linestyle='-', alpha=0.3)
-        plt.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
-        
-        # Mark the center frequencies of each band
-        for band in self.bands:
-            plt.axvline(x=band.frequency, color='r', linestyle='--', alpha=0.5)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150)
-            plt.close()
-            return save_path
-        else:
-            # Save to temp file
-            import tempfile
-            import os
-            temp_path = os.path.join(tempfile.gettempdir(), 'eq_response.png')
-            plt.savefig(temp_path, dpi=150)
-            plt.close()
-            return temp_path
-    
     def __repr__(self):
         lines = [f"ParametricEQ ({len(self.bands)} bands):"]
         for i, band in enumerate(self.bands):
@@ -174,43 +147,114 @@ class ParametricEQ:
         return "\n".join(lines)
 
 
+
 # ============================================================
 # EQ CONFIGURATION - Edit this list to adjust bands
 # ============================================================
 EQ_BANDS = [
-    {'frequency': 200,  'gain_db': 12.0,  'q': 1.0},   # Bass boost
-    {'frequency': 3000, 'gain_db': -6.0, 'q': 0.7},   # Reduce harshness
+    {'frequency': 100,  'gain_db': 12.0,  'q': 1.0},   # Bass boost
+    {'frequency': 1000, 'gain_db': -12.0, 'q': 2.0},   # Mid cut
+    {'frequency': 5000, 'gain_db': 12.0,  'q': 1.5},   # Treble boost
 ]
 
 # Create the parametric EQ
 eq = ParametricEQ(SAMPLERATE, CHANNELS, bands=EQ_BANDS)
 
-# Print EQ configuration
 print(eq)
-print()
+print("\nStarting real-time spectrum analyzer...")
 
-# Show the frequency response plot (opens in default image viewer)
-import subprocess
-plot_path = eq.plot_response()
-subprocess.run(['open', plot_path])
-print(f"EQ response plot saved to: {plot_path}")
-print()
+# Prepare the plot with two subplots
+fig, (ax_eq, ax_spec) = plt.subplots(2, 1, sharex=True, figsize=(10, 8), 
+                                    gridspec_kw={'height_ratios': [1, 2]})
+x_freqs = np.fft.rfftfreq(BLOCKSIZE, 1/SAMPLERATE)
 
+# --- Top Plot: EQ Curve ---
+eq_freqs, eq_mag = eq.get_frequency_response(n_points=2048)
+ax_eq.semilogx(eq_freqs, eq_mag, 'b-', linewidth=2)
+ax_eq.set_ylabel('EQ Gain (dB)')
+ax_eq.set_title('Parametric EQ Response')
+ax_eq.set_ylim(-24, 24)
+ax_eq.grid(True, which='both', linestyle='-', alpha=0.2)
+ax_eq.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+
+# --- Bottom Plot: Real-time Spectrum ---
+line_spectrum, = ax_spec.semilogx(x_freqs, np.full(len(x_freqs), -100), 'g-', alpha=0.4, label='Live')
+line_average, = ax_spec.semilogx(x_freqs, np.full(len(x_freqs), -100), 'y-', linewidth=2, label='Long-term Avg')
+ax_spec.set_xlim(20, SAMPLERATE / 2)
+ax_spec.set_ylim(-100, -40)  # Standard spectrum range
+ax_spec.set_xlabel('Frequency (Hz)')
+ax_spec.set_ylabel('Output Level (dB)')
+ax_spec.set_title('Live Output Spectrum')
+ax_spec.grid(True, which='both', linestyle='-', alpha=0.2)
+ax_spec.legend(loc='upper right')
+
+plt.tight_layout()
+
+# FFT window and smoothing state
+window = np.hanning(BLOCKSIZE)
+smooth_mag = np.full(len(x_freqs), -100.0)
+avg_mag = np.full(len(x_freqs), -100.0)
+alpha_smooth = 0.6  # Smoothing factor for live line
+alpha_avg = 0.15    # Smoothing factor for long-term average (lower = slower)
+
+def update_plot(frame):
+    """Update the spectrum lines from the queue data."""
+    global line_spectrum, line_average, smooth_mag, avg_mag
+    data = None
+    
+    # Get the latest data from the queue
+    while not plot_queue.empty():
+        data = plot_queue.get()
+    
+    if data is not None:
+        # Compute FFT of the first channel
+        fft_data = np.fft.rfft(data[:, 0] * window)
+        
+        # Magnitude calculation with window compensation
+        mag = np.abs(fft_data) * 2.0 / np.sum(window)
+        
+        # Apply +3dB/octave compensation
+        freq_compensation = np.sqrt(np.arange(len(mag)))
+        mag *= freq_compensation
+        
+        mag_db = 20 * np.log10(mag + 1e-10)
+        
+        # Apply exponential smoothing to live line
+        smooth_mag = (alpha_smooth * mag_db) + (1 - alpha_smooth) * smooth_mag
+        line_spectrum.set_ydata(smooth_mag)
+        
+        # Apply very slow smoothing to average line
+        avg_mag = (alpha_avg * mag_db) + (1 - alpha_avg) * avg_mag
+        line_average.set_ydata(avg_mag)
+    
+    return line_spectrum, line_average
 
 def callback(indata, outdata, frames, time, status):
     if status:
-        print(status)
+        print(status, file=sys.stderr)
+    
     # Apply parametric EQ
-    outdata[:] = eq.process(indata)
+    processed = eq.process(indata)
+    outdata[:] = processed
+    
+    # Put processed data into queue for plotting
+    try:
+        plot_queue.put_nowait(processed.copy())
+    except queue.Full:
+        pass
 
-with sd.Stream(
+# Start the audio stream
+stream = sd.Stream(
     device=(INPUT_DEVICE, OUTPUT_DEVICE),
     samplerate=SAMPLERATE,
     blocksize=BLOCKSIZE,
     channels=CHANNELS,
     dtype="float32",
     callback=callback,
-):
-    print("Routing BlackHole → MacBook Speakers (Ctrl+C to stop)")
-    while True:
-        sd.sleep(1000)
+)
+
+with stream:
+    # Start the animation
+    ani = FuncAnimation(fig, update_plot, interval=5, blit=True, cache_frame_data=False)
+    plt.show()
+
