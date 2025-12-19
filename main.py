@@ -8,15 +8,26 @@ import queue
 import sys
 import rumps
 
-INPUT_DEVICE = 2   # BlackHole 2ch
-OUTPUT_DEVICE = 1  # Scarlett
+# --- Configuration ---
+INPUT_DEVICE_NAME = "BlackHole 2ch"
+OUTPUT_DEVICE_NAME = "Scarlett"
 
 SAMPLERATE = 192000
-CHANNELS = 2
-BLOCKSIZE = 32
+BLOCKSIZE = 64
 LATENCY = 0
+ENABLE_VISUALIZATION = False
 
-ENABLE_VISUALIZATION = False  # Set to False to disable the plot and save CPU
+CROSSOVER_FREQ = 100
+
+@dataclass
+class AudioPathConfig:
+    """Configuration for an audio processing path."""
+    name: str
+    in_channels: list[int]
+    out_channels: list[int]
+    eq_bands: list
+    mono_mix: bool = False
+    gain_db: float = 0.0
 
 @dataclass
 class LowPassFilter:
@@ -53,11 +64,32 @@ class ParametricBand:
     gain_db: float
     q: float = 1.0
 
-EQ_BANDS = [
-    HighPassFilter(frequency=50, q=0.707, steepness=24),
-    LowShelf(frequency=150, q=0.707, gain_db=6.0),
-    ParametricBand(frequency=2000, q=1.0, gain_db=-3.0),
+# Define the processing paths
+AUDIO_PATHS = [
+    AudioPathConfig(
+        name="Stereo Speakers",
+        in_channels=[0, 1],
+        out_channels=[0, 1],
+        gain_db=0.0,
+        eq_bands=[
+            HighPassFilter(frequency=CROSSOVER_FREQ, q=0.707, steepness=24),
+        ]
+    ),
+    AudioPathConfig(
+        name="Subwoofer",
+        in_channels=[0, 1],
+        out_channels=[2],
+        mono_mix=True,
+        gain_db=-24.0,
+        eq_bands=[
+            LowPassFilter(frequency=CROSSOVER_FREQ, q=0.707, steepness=24),
+        ]
+    )
 ]
+
+# Calculate total channels needed
+INPUT_CHANNELS = max([max(p.in_channels) for p in AUDIO_PATHS]) + 1
+OUTPUT_CHANNELS = max([max(p.out_channels) for p in AUDIO_PATHS]) + 1
 
 class ParametricEQBand:
     """A single parametric EQ band using biquad filters."""
@@ -197,8 +229,9 @@ class ParametricEQ:
         
         # Stack all SOS sections
         self._sos = np.vstack([band.sos for band in self.bands])
-        # Initialize filter state: shape (n_sections, n_channels, 2)
-        self._zi = np.zeros((self._sos.shape[0], self.n_channels, 2), dtype=np.float64)
+        # Initialize filter state: shape (n_sections, 2, n_channels)
+        # For axis=0 in sosfilt, zi must be (n_sections, 2, n_channels)
+        self._zi = np.zeros((self._sos.shape[0], 2, self.n_channels), dtype=np.float64)
     
     def process(self, data: np.ndarray) -> np.ndarray:
         """
@@ -242,19 +275,42 @@ class ParametricEQ:
         return "\n".join(lines)
 
 
+@dataclass
+class AudioPath:
+    """Runtime instance of an audio processing path."""
+    config: AudioPathConfig
+    eq: ParametricEQ
+    linear_gain: float = 1.0
+
 class AudioProcessorApp:
     """Main application class for audio processing and visualization."""
 
     stream: sd.Stream
+    paths: list[AudioPath]
     
     def __init__(self):
-        self.eq = ParametricEQ(SAMPLERATE, CHANNELS, bands=EQ_BANDS)
+        # Find devices
+        self.input_device_id = self._find_device(INPUT_DEVICE_NAME, is_input=True)
+        self.output_device_id = self._find_device(OUTPUT_DEVICE_NAME, is_input=False)
+        
+        if self.input_device_id is None or self.output_device_id is None:
+            raise RuntimeError("Could not find specified input or output devices.")
+
+        # Initialize processing paths
+        self.paths = []
+        for path_cfg in AUDIO_PATHS:
+            n_out = len(path_cfg.out_channels)
+            eq = ParametricEQ(SAMPLERATE, n_channels=n_out, bands=path_cfg.eq_bands)
+            linear_gain = 10 ** (path_cfg.gain_db / 20)
+            self.paths.append(AudioPath(config=path_cfg, eq=eq, linear_gain=linear_gain))
+        
         self.plot_queue = queue.Queue()
+        
         self.stream = sd.Stream(
-            device=(INPUT_DEVICE, OUTPUT_DEVICE),
+            device=(self.input_device_id, self.output_device_id),
             samplerate=SAMPLERATE,
             blocksize=BLOCKSIZE,
-            channels=CHANNELS,
+            channels=(INPUT_CHANNELS, OUTPUT_CHANNELS),
             dtype="float32",
             callback=self.callback,
             latency=LATENCY
@@ -262,11 +318,26 @@ class AudioProcessorApp:
 
         # print setup
         self._print_io()
-        print(f"Sample rate: {SAMPLERATE} Hz, Channels: {CHANNELS}, Block size: {BLOCKSIZE}")
-        print(self.eq)
+        print(f"Sample rate: {SAMPLERATE} Hz")
+        print(f"Input: {INPUT_CHANNELS} channels, Output: {OUTPUT_CHANNELS} channels")
+        print(f"Block size: {BLOCKSIZE}")
+        
+        for p in self.paths:
+            print(f"\nPath: {p.config.name}")
+            print(p.eq)
 
         if ENABLE_VISUALIZATION:
             self._setup_visualization()
+
+    def _find_device(self, name_substring, is_input=True):
+        devices = sd.query_devices()
+        for i, d in enumerate(devices):
+            if name_substring.lower() in d['name'].lower():
+                if is_input and d['max_input_channels'] > 0:
+                    return i
+                if not is_input and d['max_output_channels'] > 0:
+                    return i
+        return None
 
     def _print_io(self):
         print("Available audio devices:")
@@ -275,9 +346,9 @@ class AudioProcessorApp:
             out_label = f"Output channels: {device['max_output_channels']}"
             
             # Bold the labels for the devices currently in use
-            if i == INPUT_DEVICE:
+            if i == self.input_device_id:
                 in_label = f"\033[1m{in_label}\033[0m"
-            if i == OUTPUT_DEVICE:
+            if i == self.output_device_id:
                 out_label = f"\033[1m{out_label}\033[0m"
                 
             print(f"  [{i}] {device['name']} ({in_label}, {out_label})")
@@ -294,20 +365,27 @@ class AudioProcessorApp:
                                                                gridspec_kw={'height_ratios': [1, 2]})
         self.x_freqs = np.fft.rfftfreq(BLOCKSIZE, 1/SAMPLERATE)
 
-        # --- Top Plot: EQ Curve ---
-        eq_freqs, eq_mag = self.eq.get_frequency_response(n_points=2048)
-        self.ax_eq.semilogx(eq_freqs, eq_mag, 'b-', linewidth=2)
+        # --- Top Plot: EQ Curves ---
+        colors = ['b', 'r', 'g', 'm', 'c', 'y']
+        for i, p in enumerate(self.paths):
+            eq_freqs, eq_mag = p.eq.get_frequency_response(n_points=2048)
+            # Add path gain to the magnitude response
+            eq_mag += p.config.gain_db
+            self.ax_eq.semilogx(eq_freqs, eq_mag, color=colors[i % len(colors)], 
+                               linewidth=2, label=p.config.name)
+
         self.ax_eq.set_ylabel('EQ Gain (dB)')
-        self.ax_eq.set_title('Parametric EQ Response')
+        self.ax_eq.set_title('System EQ Response')
         self.ax_eq.set_ylim(-24, 24)
         self.ax_eq.grid(True, which='both', linestyle='-', alpha=0.2)
         self.ax_eq.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+        self.ax_eq.legend(loc='lower left')
 
         # --- Bottom Plot: Real-time Spectrum ---
         self.line_spectrum, = self.ax_spec.semilogx(self.x_freqs, np.full(len(self.x_freqs), -100), 'g-', alpha=0.4, label='Live')
         self.line_average, = self.ax_spec.semilogx(self.x_freqs, np.full(len(self.x_freqs), -100), 'y-', linewidth=2, label='Long-term Avg')
-        self.ax_spec.set_xlim(20, SAMPLERATE / 2)
-        self.ax_spec.set_ylim(-100, -40)
+        self.ax_spec.set_xlim(20, 20000)
+        self.ax_spec.set_ylim(-60, 0)
         self.ax_spec.set_xlabel('Frequency (Hz)')
         self.ax_spec.set_ylabel('Output Level (dB)')
         self.ax_spec.set_title('Live Output Spectrum')
@@ -330,6 +408,7 @@ class AudioProcessorApp:
             data = self.plot_queue.get()
         
         if data is not None:
+            # Use the first channel of the first path for visualization
             fft_data = np.fft.rfft(data[:, 0] * self.window)
             mag = np.abs(fft_data) * 2.0 / np.sum(self.window)
             freq_compensation = np.sqrt(np.arange(len(mag)))
@@ -349,12 +428,30 @@ class AudioProcessorApp:
         if status:
             print(status, file=sys.stderr)
         
-        processed = self.eq.process(indata)
-        outdata[:] = processed
+        # Clear output buffer
+        outdata.fill(0)
+        
+        for p in self.paths:
+            # Extract input channels
+            path_input = indata[:, p.config.in_channels]
+            
+            # Apply mono mix if requested
+            if p.config.mono_mix:
+                path_input = np.mean(path_input, axis=1, keepdims=True)
+            
+            # Process through EQ
+            processed = p.eq.process(path_input)
+            
+            # Apply path gain
+            if p.linear_gain != 1.0:
+                processed *= p.linear_gain
+            
+            # Map to output channels
+            outdata[:, p.config.out_channels] = processed
         
         if ENABLE_VISUALIZATION:
             try:
-                self.plot_queue.put_nowait(processed.copy())
+                self.plot_queue.put_nowait(outdata.copy())
             except queue.Full:
                 pass
 
