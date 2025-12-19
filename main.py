@@ -80,8 +80,9 @@ AUDIO_PATHS = [
             ParametricBand(frequency=530, gain_db=3, q=0.7),
             ParametricBand(frequency=530, gain_db=6, q=4.0),
             ParametricBand(frequency=896, gain_db=9.0, q=4.0),
-            ParametricBand(frequency=2e3, gain_db=9.0, q=2.0),
-            HighShelf(frequency=3e3, gain_db=3.0, q=0.7)
+            ParametricBand(frequency=2e3, gain_db=4.0, q=1.0),
+            ParametricBand(frequency=3e3, gain_db=-3.0, q=1.0),
+            HighShelf(frequency=5e3, gain_db=3.0, q=0.7)
         ]
     ),
     AudioPathConfig(
@@ -93,6 +94,7 @@ AUDIO_PATHS = [
         invert=True,
         eq_bands=[
             HighPassFilter(frequency=30, q=1.0, steepness=24),
+            LowShelf(frequency=45, gain_db=6.0, q=0.7),
             ParametricBand(frequency=72, gain_db=8.0, q=8.0),
             ParametricBand(frequency=89, gain_db=12.0, q=2),
             LowPassFilter(frequency=100, q=0.707, steepness=24),
