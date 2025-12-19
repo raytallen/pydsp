@@ -6,6 +6,7 @@ from scipy.signal import sosfilt, sosfreqz, butter
 from dataclasses import dataclass
 import queue
 import sys
+import rumps
 
 INPUT_DEVICE = 0   # BlackHole 2ch
 OUTPUT_DEVICE = 2  # MacBook Pro Speakers
@@ -346,9 +347,8 @@ class AudioProcessorApp:
             except queue.Full:
                 pass
 
-    def run(self):
-        """Start the audio stream and visualization."""
-        
+    def start_stream(self):
+        """Start the audio stream."""
         stream = sd.Stream(
             device=(INPUT_DEVICE, OUTPUT_DEVICE),
             samplerate=SAMPLERATE,
@@ -358,22 +358,66 @@ class AudioProcessorApp:
             callback=self.callback,
             latency=LATENCY
         )
+        stream.start()
+        return stream
+
+    def stop_stream(self, stream):
+        """Stop the audio stream."""
+        if stream:
+            stream.stop()
+            stream.close()
+
+    def run(self):
+        """Start the audio stream and visualization."""
         
-        with stream:
-            if ENABLE_VISUALIZATION:
-                print("\nStarting real-time spectrum analyzer...")
-                ani = self.FuncAnimation(self.fig, self.update_plot, interval=5, blit=True, cache_frame_data=False)
-                self.plt.show()
-            else:
-                print(f"Input latency: {stream.latency[0]*1000:.2f}ms\tOutput latency: {stream.latency[1]*1000:.2f}ms")
-                try:
-                    while True:
-                        sd.sleep(1000)
-                except KeyboardInterrupt:
-                    print("\nStopped.")
+        stream = self.start_stream()
+        
+        if ENABLE_VISUALIZATION:
+            print("\nStarting real-time spectrum analyzer...")
+            ani = self.FuncAnimation(self.fig, self.update_plot, interval=5, blit=True, cache_frame_data=False)
+            self.plt.show()
+        else:
+            print(f"Input latency: {stream.latency[0]*1000:.2f}ms\tOutput latency: {stream.latency[1]*1000:.2f}ms")
+            try:
+                while True:
+                    sd.sleep(1000)
+            except KeyboardInterrupt:
+                print("\nStopped.")
+        
+        self.stop_stream(stream)
+
+
+class MenuBarApp(rumps.App):
+    """macOS Menu Bar application wrapper."""
+    
+    def __init__(self, processor):
+        super(MenuBarApp, self).__init__("EQ", template=True)
+        self.processor = processor
+        self.stream = None
+        
+        self.toggle_button = rumps.MenuItem("Start EQ", callback=self.toggle_eq)
+        self.menu = [self.toggle_button]
+        
+        # Start automatically
+        self.toggle_eq(None)
+
+    def toggle_eq(self, sender):
+        if self.stream is None:
+            try:
+                self.stream = self.processor.start_stream()
+                self.toggle_button.title = "Stop EQ"
+                self.title = "EQ ON"
+            except Exception as e:
+                rumps.alert("Error", f"Could not start audio stream: {e}")
+        else:
+            self.processor.stop_stream(self.stream)
+            self.stream = None
+            self.toggle_button.title = "Start EQ"
+            self.title = "EQ"
 
 
 if __name__ == "__main__":
     print(f"Python version: {sys.version}")
-    app = AudioProcessorApp()
+    app_logic = AudioProcessorApp()
+    app = MenuBarApp(app_logic)
     app.run()
