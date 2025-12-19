@@ -17,7 +17,6 @@ BLOCKSIZE = 128     # Increased from 64 to 256 for better efficiency
 LATENCY = 0     # Let sounddevice manage optimal latency
 ENABLE_VISUALIZATION = False
 
-CROSSOVER_FREQ = 100
 
 @dataclass
 class AudioPathConfig:
@@ -28,6 +27,7 @@ class AudioPathConfig:
     eq_bands: list
     mono_mix: bool = False
     gain_db: float = 0.0
+    invert: bool = False
 
 @dataclass
 class LowPassFilter:
@@ -71,8 +71,17 @@ AUDIO_PATHS = [
         in_channels=[0, 1],
         out_channels=[0, 1],
         gain_db=0.0,
+        invert=False,
         eq_bands=[
-            HighPassFilter(frequency=CROSSOVER_FREQ, q=0.707, steepness=24),
+            HighPassFilter(frequency=100, q=0.707, steepness=24),
+            ParametricBand(frequency=110, gain_db=-6.0, q=2),
+            ParametricBand(frequency=132, gain_db=8.0, q=4),
+            ParametricBand(frequency=300, gain_db=3, q=0.7),
+            ParametricBand(frequency=530, gain_db=3, q=0.7),
+            ParametricBand(frequency=530, gain_db=6, q=4.0),
+            ParametricBand(frequency=896, gain_db=9.0, q=4.0),
+            ParametricBand(frequency=2e3, gain_db=9.0, q=2.0),
+            HighShelf(frequency=3e3, gain_db=3.0, q=0.7)
         ]
     ),
     AudioPathConfig(
@@ -80,9 +89,13 @@ AUDIO_PATHS = [
         in_channels=[0, 1],
         out_channels=[2],
         mono_mix=True,
-        gain_db=-6.0,
+        gain_db=-12.0,
+        invert=True,
         eq_bands=[
-            LowPassFilter(frequency=CROSSOVER_FREQ, q=0.707, steepness=24),
+            HighPassFilter(frequency=30, q=1.0, steepness=24),
+            ParametricBand(frequency=72, gain_db=8.0, q=8.0),
+            ParametricBand(frequency=89, gain_db=12.0, q=2),
+            LowPassFilter(frequency=100, q=0.707, steepness=24),
         ]
     )
 ]
@@ -339,7 +352,8 @@ class AudioProcessorApp:
         print(f"Block size: {BLOCKSIZE}")
         
         for p in self.paths:
-            print(f"\nPath: {p.config.name}")
+            invert_str = " (INVERTED)" if p.config.invert else ""
+            print(f"\nPath: {p.config.name}{invert_str}")
             print(p.eq)
 
         if ENABLE_VISUALIZATION:
@@ -479,6 +493,10 @@ class AudioProcessorApp:
             # Apply gain separately (calculated here to allow for future dynamic changes)
             if p.config.gain_db != 0:
                 processed *= 10 ** (p.config.gain_db / 20)
+            
+            # Apply phase inversion if requested
+            if p.config.invert:
+                processed *= -1.0
                 
             # Map to output channels
             outdata[:, p.out_idx] = processed
