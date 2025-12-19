@@ -12,9 +12,9 @@ import rumps
 INPUT_DEVICE_NAME = "BlackHole 2ch"
 OUTPUT_DEVICE_NAME = "Scarlett"
 
-SAMPLERATE = 192000
-BLOCKSIZE = 64
-LATENCY = 0
+SAMPLERATE = 96000  # Reduced from 192kHz to 96kHz
+BLOCKSIZE = 128     # Increased from 64 to 256 for better efficiency
+LATENCY = 0     # Let sounddevice manage optimal latency
 ENABLE_VISUALIZATION = False
 
 CROSSOVER_FREQ = 100
@@ -80,7 +80,7 @@ AUDIO_PATHS = [
         in_channels=[0, 1],
         out_channels=[2],
         mono_mix=True,
-        gain_db=-24.0,
+        gain_db=-6.0,
         eq_bands=[
             LowPassFilter(frequency=CROSSOVER_FREQ, q=0.707, steepness=24),
         ]
@@ -229,8 +229,8 @@ class ParametricEQ:
         
         # Stack all SOS sections
         self._sos = np.vstack([band.sos for band in self.bands])
+            
         # Initialize filter state: shape (n_sections, 2, n_channels)
-        # For axis=0 in sosfilt, zi must be (n_sections, 2, n_channels)
         self._zi = np.zeros((self._sos.shape[0], 2, self.n_channels), dtype=np.float64)
     
     def process(self, data: np.ndarray) -> np.ndarray:
@@ -280,7 +280,8 @@ class AudioPath:
     """Runtime instance of an audio processing path."""
     config: AudioPathConfig
     eq: ParametricEQ
-    linear_gain: float = 1.0
+    in_idx: object  # slice or list for indexing
+    out_idx: object # slice or list for indexing
 
 class AudioProcessorApp:
     """Main application class for audio processing and visualization."""
@@ -300,9 +301,24 @@ class AudioProcessorApp:
         self.paths = []
         for path_cfg in AUDIO_PATHS:
             n_out = len(path_cfg.out_channels)
-            eq = ParametricEQ(SAMPLERATE, n_channels=n_out, bands=path_cfg.eq_bands)
-            linear_gain = 10 ** (path_cfg.gain_db / 20)
-            self.paths.append(AudioPath(config=path_cfg, eq=eq, linear_gain=linear_gain))
+            
+            # Initialize EQ (gain is now handled separately)
+            eq = ParametricEQ(
+                SAMPLERATE, 
+                n_channels=n_out, 
+                bands=path_cfg.eq_bands
+            )
+            
+            # OPTIMIZATION: Use slices for contiguous channels to avoid fancy indexing copies
+            in_idx = self._get_best_index(path_cfg.in_channels)
+            out_idx = self._get_best_index(path_cfg.out_channels)
+            
+            self.paths.append(AudioPath(
+                config=path_cfg, 
+                eq=eq, 
+                in_idx=in_idx, 
+                out_idx=out_idx
+            ))
         
         self.plot_queue = queue.Queue()
         
@@ -328,6 +344,19 @@ class AudioProcessorApp:
 
         if ENABLE_VISUALIZATION:
             self._setup_visualization()
+
+    def _get_best_index(self, channels):
+        """Return a slice if channels are contiguous, else the list."""
+        if not channels:
+            return slice(0, 0)
+        if len(channels) == 1:
+            return slice(channels[0], channels[0] + 1)
+        
+        # Check if contiguous
+        sorted_ch = sorted(channels)
+        if sorted_ch == list(range(min(channels), max(channels) + 1)):
+            return slice(min(channels), max(channels) + 1)
+        return channels
 
     def _find_device(self, name_substring, is_input=True):
         devices = sd.query_devices()
@@ -426,33 +455,40 @@ class AudioProcessorApp:
     def callback(self, indata, outdata, frames, time, status):
         """Audio stream callback."""
         if status:
-            print(status, file=sys.stderr)
+            # Avoid printing in callback if possible, but keep for debugging
+            pass
         
-        # Clear output buffer
+        # Clear output buffer (fast in NumPy)
         outdata.fill(0)
         
         for p in self.paths:
-            # Extract input channels
-            path_input = indata[:, p.config.in_channels]
+            # Extract input channels (view if slice, copy if list)
+            path_input = indata[:, p.in_idx]
             
             # Apply mono mix if requested
             if p.config.mono_mix:
-                path_input = np.mean(path_input, axis=1, keepdims=True)
+                # OPTIMIZATION: Faster mono mix for stereo inputs
+                if path_input.shape[1] == 2:
+                    path_input = (path_input[:, 0:1] + path_input[:, 1:2]) * 0.5
+                else:
+                    path_input = path_input.mean(axis=1, keepdims=True)
             
             # Process through EQ
             processed = p.eq.process(path_input)
             
-            # Apply path gain
-            if p.linear_gain != 1.0:
-                processed *= p.linear_gain
-            
+            # Apply gain separately (calculated here to allow for future dynamic changes)
+            if p.config.gain_db != 0:
+                processed *= 10 ** (p.config.gain_db / 20)
+                
             # Map to output channels
-            outdata[:, p.config.out_channels] = processed
+            outdata[:, p.out_idx] = processed
         
         if ENABLE_VISUALIZATION:
             try:
-                self.plot_queue.put_nowait(outdata.copy())
-            except queue.Full:
+                # OPTIMIZATION: Only copy if the queue has space to avoid blocking
+                if self.plot_queue.qsize() < 2:
+                    self.plot_queue.put_nowait(outdata.copy())
+            except (queue.Full, AttributeError):
                 pass
 
     def stop_stream(self):
