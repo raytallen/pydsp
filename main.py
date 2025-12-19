@@ -12,7 +12,8 @@ OUTPUT_DEVICE = 2  # MacBook Pro Speakers
 
 SAMPLERATE = 48000
 CHANNELS = 2
-BLOCKSIZE = 256  # Increased for better FFT resolution
+BLOCKSIZE = 32
+LATENCY = 0
 
 ENABLE_VISUALIZATION = False  # Set to False to disable the plot and save CPU
 
@@ -52,12 +53,10 @@ class ParametricBand:
     q: float = 1.0
 
 EQ_BANDS = [
-    HighPassFilter(frequency=40, q=0.707, steepness=48),
-    LowShelf(frequency=100, gain_db=6.0, q=0.707),
-    ParametricBand(frequency=1000, gain_db=-3.0, q=1.0),
-    LowPassFilter(frequency=10000, q=0.707, steepness=24),
+    HighPassFilter(frequency=50, q=0.707, steepness=24),
+    LowShelf(frequency=150, q=0.707, gain_db=6.0),
+    ParametricBand(frequency=2000, q=1.0, gain_db=-3.0),
 ]
-
 
 class ParametricEQBand:
     """A single parametric EQ band using biquad filters."""
@@ -357,6 +356,7 @@ class AudioProcessorApp:
             channels=CHANNELS,
             dtype="float32",
             callback=self.callback,
+            latency=LATENCY
         )
         
         with stream:
@@ -365,7 +365,7 @@ class AudioProcessorApp:
                 ani = self.FuncAnimation(self.fig, self.update_plot, interval=5, blit=True, cache_frame_data=False)
                 self.plt.show()
             else:
-                print("Visualization disabled. Press Ctrl+C to stop.")
+                print(f"Input latency: {stream.latency[0]*1000:.2f}ms\tOutput latency: {stream.latency[1]*1000:.2f}ms")
                 try:
                     while True:
                         sd.sleep(1000)
