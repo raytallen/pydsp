@@ -8,10 +8,10 @@ import queue
 import sys
 import rumps
 
-INPUT_DEVICE = 0   # BlackHole 2ch
-OUTPUT_DEVICE = 2  # MacBook Pro Speakers
+INPUT_DEVICE = 2   # BlackHole 2ch
+OUTPUT_DEVICE = 1  # Scarlett
 
-SAMPLERATE = 48000
+SAMPLERATE = 192000
 CHANNELS = 2
 BLOCKSIZE = 32
 LATENCY = 0
@@ -146,7 +146,7 @@ class ParametricEQBand:
     def __repr__(self):
         type_name = self.config_type.__name__.replace('Config', '')
         steep_str = f", steep={self.steepness}dB/oct" if self.config_type in [LowPassFilter, HighPassFilter] else ""
-        return f"EQBand(type={type_name:<10}, freq={self.frequency:>7.1f} Hz, gain={self.gain_db:>+6.1f} dB, Q={self.q:.2f}{steep_str})"
+        return f"{type_name:<16},\tfreq={self.frequency:>7.1f} Hz, gain={self.gain_db:>+6.1f} dB, Q={self.q:.2f}{steep_str}"
 
 
 class ParametricEQ:
@@ -244,10 +244,21 @@ class ParametricEQ:
 
 class AudioProcessorApp:
     """Main application class for audio processing and visualization."""
+
+    stream: sd.Stream
     
     def __init__(self):
         self.eq = ParametricEQ(SAMPLERATE, CHANNELS, bands=EQ_BANDS)
         self.plot_queue = queue.Queue()
+        self.stream = sd.Stream(
+            device=(INPUT_DEVICE, OUTPUT_DEVICE),
+            samplerate=SAMPLERATE,
+            blocksize=BLOCKSIZE,
+            channels=CHANNELS,
+            dtype="float32",
+            callback=self.callback,
+            latency=LATENCY
+        )
 
         # print setup
         self._print_io()
@@ -347,53 +358,33 @@ class AudioProcessorApp:
             except queue.Full:
                 pass
 
-    def start_stream(self):
-        """Start the audio stream."""
-        stream = sd.Stream(
-            device=(INPUT_DEVICE, OUTPUT_DEVICE),
-            samplerate=SAMPLERATE,
-            blocksize=BLOCKSIZE,
-            channels=CHANNELS,
-            dtype="float32",
-            callback=self.callback,
-            latency=LATENCY
-        )
-        stream.start()
-        return stream
-
-    def stop_stream(self, stream):
+    def stop_stream(self):
         """Stop the audio stream."""
-        if stream:
-            stream.stop()
-            stream.close()
+        if self.stream:
+            self.stream.stop()
 
-    def run(self):
-        """Start the audio stream and visualization."""
-        
-        stream = self.start_stream()
-        
-        if ENABLE_VISUALIZATION:
-            print("\nStarting real-time spectrum analyzer...")
-            ani = self.FuncAnimation(self.fig, self.update_plot, interval=5, blit=True, cache_frame_data=False)
-            self.plt.show()
-        else:
-            print(f"Input latency: {stream.latency[0]*1000:.2f}ms\tOutput latency: {stream.latency[1]*1000:.2f}ms")
-            try:
-                while True:
-                    sd.sleep(1000)
-            except KeyboardInterrupt:
-                print("\nStopped.")
-        
-        self.stop_stream(stream)
+    def print_latency(self):
+        """Print the current stream latency."""
+        if self.stream:
+            print(f"Input latency: {self.stream.latency[0]*1000:.2f}ms\tOutput latency: {self.stream.latency[1]*1000:.2f}ms")
+
+    def start_stream(self):
+        """Start the audio stream, print latency, and handle visualization."""
+        if self.stream and not self.stream.active:
+            self.stream.start()
+            self.print_latency()
+            if ENABLE_VISUALIZATION:
+                print("\nStarting real-time spectrum analyzer...")
+                self.ani = self.FuncAnimation(self.fig, self.update_plot, interval=5, blit=True, cache_frame_data=False)
+                self.plt.show()
 
 
 class MenuBarApp(rumps.App):
     """macOS Menu Bar application wrapper."""
     
-    def __init__(self, processor):
+    def __init__(self, processor: AudioProcessorApp):
         super(MenuBarApp, self).__init__("EQ", template=True)
         self.processor = processor
-        self.stream = None
         
         self.toggle_button = rumps.MenuItem("Start EQ", callback=self.toggle_eq)
         self.menu = [self.toggle_button]
@@ -402,16 +393,15 @@ class MenuBarApp(rumps.App):
         self.toggle_eq(None)
 
     def toggle_eq(self, sender):
-        if self.stream is None:
+        if not self.processor.stream.active:
             try:
-                self.stream = self.processor.start_stream()
+                self.processor.start_stream()
                 self.toggle_button.title = "Stop EQ"
                 self.title = "EQ ON"
             except Exception as e:
                 rumps.alert("Error", f"Could not start audio stream: {e}")
         else:
-            self.processor.stop_stream(self.stream)
-            self.stream = None
+            self.processor.stop_stream()
             self.toggle_button.title = "Start EQ"
             self.title = "EQ"
 
