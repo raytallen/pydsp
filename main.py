@@ -2,23 +2,15 @@
 
 import sounddevice as sd
 import numpy as np
-from scipy.signal import sosfilt, sosfreqz, butter
+from scipy.signal import sosfilt, butter
 from dataclasses import dataclass
-import queue
 import sys
 import rumps
-
-# --- Configuration ---
-INPUT_DEVICE_NAME = "BlackHole 2ch"
-OUTPUT_DEVICE_NAME = "Scarlett"
-SAMPLERATE = 96000
-BLOCKSIZE = 512
-LATENCY = 0
-ENABLE_VISUALIZATION = False
+import yaml
+import os
 
 @dataclass
 class AudioPathConfig:
-    """Configuration for an audio processing path."""
     name: str
     in_channels: list[int]
     out_channels: list[int]
@@ -29,87 +21,75 @@ class AudioPathConfig:
 
 @dataclass
 class LowPassFilter:
-    """Configuration for a low-pass filter."""
     frequency: float
     q: float = 0.707
     steepness: int = 12
 
 @dataclass
 class HighPassFilter:
-    """Configuration for a high-pass filter."""
     frequency: float
     q: float = 0.707
     steepness: int = 12
 
 @dataclass
 class LowShelf:
-    """Configuration for a low-shelf filter."""
     frequency: float
     gain_db: float
     q: float = 0.707
 
 @dataclass
 class HighShelf:
-    """Configuration for a high-shelf filter."""
     frequency: float
     gain_db: float
     q: float = 0.707
 
 @dataclass
 class ParametricBand:
-    """Configuration for a peaking (parametric) EQ band."""
     frequency: float
     gain_db: float
     q: float = 1.0
 
-# Define the processing paths
-AUDIO_PATHS = [
-    AudioPathConfig(
-        name="Stereo Speakers",
-        in_channels=[0, 1],
-        out_channels=[0, 1],
-        gain_db=0.0,
-        invert=False,
-        eq_bands=[
-            HighPassFilter(frequency=60, q=0.707, steepness=24),
-            ParametricBand(frequency=67, gain_db=-3, q=4),
-            ParametricBand(frequency=76, gain_db=6.0, q=4),
-            ParametricBand(frequency=112, gain_db=-9, q=4),
-            ParametricBand(frequency=130, gain_db=9.0, q=4),
-            ParametricBand(frequency=185, gain_db=-6.0, q=1),
-            ParametricBand(frequency=286, gain_db=3, q=1),
-            # ParametricBand(frequency=530, gain_db=3, q=0.7),
-            ParametricBand(frequency=560, gain_db=6, q=4.0),
-            # ParametricBand(frequency=700, gain_db=-3.0, q=1.0),
-            ParametricBand(frequency=896, gain_db=6.0, q=4.0),
-            # ParametricBand(frequency=2e3, gain_db=2.0, q=1.0),
-            # ParametricBand(frequency=4.3e3, gain_db=2.0, q=1.0),
-            # ParametricBand(frequency=8e3, gain_db=-3.0, q=1.0),
-            # ParametricBand(frequency=3e3, gain_db=-3.0, q=1.0),
-            # HighShelf(frequency=4.5e3, gain_db=3.0, q=1.0)
-        ]
-    ),
-    AudioPathConfig(
-        name="Subwoofer",
-        in_channels=[0, 1],
-        out_channels=[2],
-        mono_mix=True,
-        gain_db=-3,
-        invert=True,
-        eq_bands=[
-            HighPassFilter(frequency=30, q=1.0, steepness=48),
-            LowShelf(frequency=43, gain_db=9.0, q=.8),
-            ParametricBand(frequency=46, gain_db=-6, q=4),
-            # ParametricBand(frequency=54, gain_db=2, q=4),
-            # ParametricBand(frequency=67, gain_db=-3, q=4),
-            # ParametricBand(frequency=72, gain_db=3.0, q=8.0),
-            # ParametricBand(frequency=79, gain_db=-3.0, q=4),
-            # ParametricBand(frequency=90, gain_db=3.0, q=2),
-            # ParametricBand(frequency=95, gain_db=-3.0, q=4),
-            LowPassFilter(frequency=60, q=0.707, steepness=24),
-        ]
-    )
-]
+def load_config(filename="config.yaml"):
+    # Get the directory of the current script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, filename)
+    
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+
+    with open(config_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+    
+    # Map filter types to classes
+    filter_map = {
+        'LowPassFilter': LowPassFilter,
+        'HighPassFilter': HighPassFilter,
+        'LowShelf': LowShelf,
+        'HighShelf': HighShelf,
+        'ParametricBand': ParametricBand
+    }
+    
+    audio_paths = []
+    for path_data in config_data['audio_paths']:
+        eq_bands = []
+        for band_data in path_data['eq_bands']:
+            filter_type = band_data.pop('type')
+            filter_class = filter_map[filter_type]
+            eq_bands.append(filter_class(**band_data))
+        
+        path_data['eq_bands'] = eq_bands
+        audio_paths.append(AudioPathConfig(**path_data))
+    
+    return config_data, audio_paths
+
+# Load configuration
+config_data, AUDIO_PATHS = load_config()
+
+INPUT_DEVICE_NAME = config_data['input_device_name']
+OUTPUT_DEVICE_NAME = config_data['output_device_name']
+SAMPLERATE = config_data.get('samplerate', 44100)
+BLOCKSIZE = config_data.get('blocksize', 512)
+LATENCY = config_data.get('latency', 0)
 
 # Calculate total channels needed
 INPUT_CHANNELS = max([max(p.in_channels) for p in AUDIO_PATHS]) + 1
@@ -257,28 +237,6 @@ class ParametricEQ:
         output, self._zi = sosfilt(self._sos, data, axis=0, zi=self._zi)
         return output
     
-    def get_frequency_response(self, n_points: int = 1024):
-        """
-        Calculate the combined frequency response of all EQ bands.
-        Uses logarithmic spacing for better resolution at low frequencies.
-        
-        Args:
-            n_points: Number of frequency points
-            
-        Returns:
-            frequencies: Array of frequencies in Hz
-            magnitude_db: Array of magnitude response in dB
-        """
-        # Generate logarithmically spaced frequencies from 20Hz to Nyquist
-        freqs = np.logspace(np.log10(20), np.log10(self.samplerate / 2), n_points)
-        
-        if self._sos is None:
-            return freqs, np.zeros(n_points)
-        
-        w, h = sosfreqz(self._sos, worN=freqs, fs=self.samplerate)
-        magnitude_db = 20 * np.log10(np.abs(h) + 1e-10)
-        return w, magnitude_db
-    
     def __repr__(self):
         lines = [f"ParametricEQ ({len(self.bands)} bands):"]
         for i, band in enumerate(self.bands):
@@ -331,7 +289,6 @@ class AudioProcessorApp:
                 out_idx=out_idx
             ))
         
-        self.plot_queue = queue.Queue()
         self.max_input_peaks = np.zeros(INPUT_CHANNELS)
         self.max_output_peaks = np.zeros(OUTPUT_CHANNELS)
         
@@ -355,9 +312,6 @@ class AudioProcessorApp:
             invert_str = " (INVERTED)" if p.config.invert else ""
             print(f"\nPath: {p.config.name}{invert_str}")
             print(p.eq)
-
-        if ENABLE_VISUALIZATION:
-            self._setup_visualization()
 
     def _get_best_index(self, channels):
         """Return a slice if channels are contiguous, else the list."""
@@ -396,75 +350,6 @@ class AudioProcessorApp:
                 
             print(f"  [{i}] {device['name']} ({in_label}, {out_label})")
 
-    def _setup_visualization(self):
-        """Initialize the matplotlib plots."""
-
-        import matplotlib.pyplot as plt
-        from matplotlib.animation import FuncAnimation
-        self.plt = plt
-        self.FuncAnimation = FuncAnimation
-
-        self.fig, (self.ax_eq, self.ax_spec) = self.plt.subplots(2, 1, sharex=True, figsize=(10, 8), 
-                                                               gridspec_kw={'height_ratios': [1, 2]})
-        self.x_freqs = np.fft.rfftfreq(BLOCKSIZE, 1/SAMPLERATE)
-
-        # --- Top Plot: EQ Curves ---
-        colors = ['b', 'r', 'g', 'm', 'c', 'y']
-        for i, p in enumerate(self.paths):
-            eq_freqs, eq_mag = p.eq.get_frequency_response(n_points=2048)
-            # Note: gain_db is excluded from visualization as requested
-            self.ax_eq.semilogx(eq_freqs, eq_mag, color=colors[i % len(colors)], 
-                               linewidth=2, label=p.config.name)
-
-        self.ax_eq.set_ylabel('EQ Gain (dB)')
-        self.ax_eq.set_title('System EQ Response')
-        self.ax_eq.set_ylim(-24, 24)
-        self.ax_eq.grid(True, which='both', linestyle='-', alpha=0.2)
-        self.ax_eq.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
-        self.ax_eq.legend(loc='lower left')
-
-        # --- Bottom Plot: Real-time Spectrum ---
-        self.line_spectrum, = self.ax_spec.semilogx(self.x_freqs, np.full(len(self.x_freqs), -100), 'g-', alpha=0.4, label='Live')
-        self.line_average, = self.ax_spec.semilogx(self.x_freqs, np.full(len(self.x_freqs), -100), 'y-', linewidth=2, label='Long-term Avg')
-        self.ax_spec.set_xlim(20, 20000)
-        self.ax_spec.set_ylim(-80, -20)
-        self.ax_spec.set_xlabel('Frequency (Hz)')
-        self.ax_spec.set_ylabel('Output Level (dB)')
-        self.ax_spec.set_title('Live Output Spectrum')
-        self.ax_spec.grid(True, which='both', linestyle='-', alpha=0.2)
-        self.ax_spec.legend(loc='upper right')
-
-        self.plt.tight_layout()
-
-        # FFT window and smoothing state
-        self.window = np.hanning(BLOCKSIZE)
-        self.smooth_mag = np.full(len(self.x_freqs), -100.0)
-        self.avg_mag = np.full(len(self.x_freqs), -100.0)
-        self.alpha_smooth = 0.6
-        self.alpha_avg = 0.15
-
-    def update_plot(self, frame):
-        """Update the spectrum lines from the queue data."""
-        data = None
-        while not self.plot_queue.empty():
-            data = self.plot_queue.get()
-        
-        if data is not None:
-            # Use the first channel of the first path for visualization
-            fft_data = np.fft.rfft(data[:, 0] * self.window)
-            mag = np.abs(fft_data) * 2.0 / np.sum(self.window)
-            freq_compensation = np.sqrt(np.arange(len(mag)))
-            mag *= freq_compensation
-            mag_db = 20 * np.log10(mag + 1e-10)
-            
-            self.smooth_mag = (self.alpha_smooth * mag_db) + (1 - self.alpha_smooth) * self.smooth_mag
-            self.line_spectrum.set_ydata(self.smooth_mag)
-            
-            self.avg_mag = (self.alpha_avg * mag_db) + (1 - self.alpha_avg) * self.avg_mag
-            self.line_average.set_ydata(self.avg_mag)
-        
-        return self.line_spectrum, self.line_average
-
     def callback(self, indata: np.ndarray, outdata: np.ndarray, frames: int, time, status):
         """Audio stream callback."""
         
@@ -499,14 +384,6 @@ class AudioProcessorApp:
         # Track peak levels for headroom monitoring
         self.max_input_peaks = np.maximum(self.max_input_peaks, np.max(np.abs(indata), axis=0))
         self.max_output_peaks = np.maximum(self.max_output_peaks, np.max(np.abs(outdata), axis=0))
-        
-        if ENABLE_VISUALIZATION:
-            try:
-                # OPTIMIZATION: Only copy if the queue has space to avoid blocking
-                if self.plot_queue.qsize() < 2:
-                    self.plot_queue.put_nowait(outdata.copy())
-            except (queue.Full, AttributeError):
-                pass
 
     def stop_stream(self):
         """Stop the audio stream."""
@@ -534,14 +411,10 @@ class AudioProcessorApp:
         return in_headroom, out_headroom
 
     def start_stream(self):
-        """Start the audio stream, print latency, and handle visualization."""
+        """Start the audio stream and print latency."""
         if self.stream and not self.stream.active:
             self.stream.start()
             self.print_latency()
-            if ENABLE_VISUALIZATION:
-                print("\nStarting real-time spectrum analyzer...")
-                self.ani = self.FuncAnimation(self.fig, self.update_plot, interval=5, blit=True, cache_frame_data=False)
-                self.plt.show()
 
 
 class MenuBarApp(rumps.App):
