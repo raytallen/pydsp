@@ -11,12 +11,10 @@ import rumps
 # --- Configuration ---
 INPUT_DEVICE_NAME = "BlackHole 2ch"
 OUTPUT_DEVICE_NAME = "Scarlett"
-
-SAMPLERATE = 96000  # Reduced from 192kHz to 96kHz
-BLOCKSIZE = 128     # Increased from 64 to 256 for better efficiency
-LATENCY = 0     # Let sounddevice manage optimal latency
+SAMPLERATE = 96000
+BLOCKSIZE = 512
+LATENCY = 0
 ENABLE_VISUALIZATION = False
-
 
 @dataclass
 class AudioPathConfig:
@@ -73,16 +71,22 @@ AUDIO_PATHS = [
         gain_db=0.0,
         invert=False,
         eq_bands=[
-            HighPassFilter(frequency=100, q=0.707, steepness=24),
-            ParametricBand(frequency=110, gain_db=-6.0, q=2),
-            ParametricBand(frequency=132, gain_db=8.0, q=4),
-            ParametricBand(frequency=300, gain_db=3, q=0.7),
-            ParametricBand(frequency=530, gain_db=3, q=0.7),
-            ParametricBand(frequency=530, gain_db=6, q=4.0),
-            ParametricBand(frequency=896, gain_db=9.0, q=4.0),
-            ParametricBand(frequency=2e3, gain_db=4.0, q=1.0),
-            ParametricBand(frequency=3e3, gain_db=-3.0, q=1.0),
-            HighShelf(frequency=5e3, gain_db=3.0, q=0.7)
+            HighPassFilter(frequency=60, q=0.707, steepness=24),
+            ParametricBand(frequency=67, gain_db=-3, q=4),
+            ParametricBand(frequency=76, gain_db=6.0, q=4),
+            ParametricBand(frequency=112, gain_db=-9, q=4),
+            ParametricBand(frequency=130, gain_db=9.0, q=4),
+            ParametricBand(frequency=185, gain_db=-6.0, q=1),
+            ParametricBand(frequency=286, gain_db=3, q=1),
+            # ParametricBand(frequency=530, gain_db=3, q=0.7),
+            ParametricBand(frequency=560, gain_db=6, q=4.0),
+            # ParametricBand(frequency=700, gain_db=-3.0, q=1.0),
+            ParametricBand(frequency=896, gain_db=6.0, q=4.0),
+            # ParametricBand(frequency=2e3, gain_db=2.0, q=1.0),
+            # ParametricBand(frequency=4.3e3, gain_db=2.0, q=1.0),
+            # ParametricBand(frequency=8e3, gain_db=-3.0, q=1.0),
+            # ParametricBand(frequency=3e3, gain_db=-3.0, q=1.0),
+            # HighShelf(frequency=4.5e3, gain_db=3.0, q=1.0)
         ]
     ),
     AudioPathConfig(
@@ -90,14 +94,19 @@ AUDIO_PATHS = [
         in_channels=[0, 1],
         out_channels=[2],
         mono_mix=True,
-        gain_db=-12.0,
+        gain_db=-3,
         invert=True,
         eq_bands=[
-            HighPassFilter(frequency=30, q=1.0, steepness=24),
-            LowShelf(frequency=45, gain_db=6.0, q=0.7),
-            ParametricBand(frequency=72, gain_db=8.0, q=8.0),
-            ParametricBand(frequency=89, gain_db=12.0, q=2),
-            LowPassFilter(frequency=100, q=0.707, steepness=24),
+            HighPassFilter(frequency=30, q=1.0, steepness=48),
+            LowShelf(frequency=43, gain_db=9.0, q=.8),
+            ParametricBand(frequency=46, gain_db=-6, q=4),
+            # ParametricBand(frequency=54, gain_db=2, q=4),
+            # ParametricBand(frequency=67, gain_db=-3, q=4),
+            # ParametricBand(frequency=72, gain_db=3.0, q=8.0),
+            # ParametricBand(frequency=79, gain_db=-3.0, q=4),
+            # ParametricBand(frequency=90, gain_db=3.0, q=2),
+            # ParametricBand(frequency=95, gain_db=-3.0, q=4),
+            LowPassFilter(frequency=60, q=0.707, steepness=24),
         ]
     )
 ]
@@ -110,18 +119,8 @@ class ParametricEQBand:
     """A single parametric EQ band using biquad filters."""
     
     def __init__(self, frequency: float, gain_db: float, q: float, samplerate: float, 
-                 config_type: type = ParametricBand, steepness: int = 12):
-        """
-        Initialize a parametric EQ band.
-        
-        Args:
-            frequency: Center frequency in Hz
-            gain_db: Gain in dB (used for peaking and shelves)
-            q: Q factor (bandwidth control)
-            samplerate: Sample rate in Hz
-            config_type: The configuration class type (LowPassConfig, etc.)
-            steepness: Filter steepness in dB/octave (12, 24, 36, 48). Only for LP/HP.
-        """
+                 config_type: type, steepness: int):
+
         self.samplerate = samplerate
         self.frequency = frequency
         self.gain_db = gain_db
@@ -129,12 +128,10 @@ class ParametricEQBand:
         self.config_type = config_type
         self.steepness = steepness
         
-        # Calculate filter coefficients
         self._calculate_coefficients()
     
     def _calculate_coefficients(self):
         """Calculate biquad filter coefficients in SOS format."""
-        # For LP/HP with higher steepness, use scipy.signal.butter
         if self.config_type in [LowPassFilter, HighPassFilter] and self.steepness > 12:
             order = int(self.steepness / 6)
             btype = 'lowpass' if self.config_type is LowPassFilter else 'highpass'
@@ -201,14 +198,7 @@ class ParametricEQ:
     
     def __init__(self, samplerate: float, n_channels: int = 2, 
                  bands: list = None):
-        """
-        Initialize the parametric EQ.
-        
-        Args:
-            samplerate: Sample rate in Hz
-            n_channels: Number of audio channels
-            bands: List of band configuration objects
-        """
+
         self.samplerate = samplerate
         self.n_channels = n_channels
         self.bands: list[ParametricEQBand] = []
@@ -261,12 +251,16 @@ class ParametricEQ:
         if self._sos is None:
             return data
         
+        # Add a tiny amount of noise to prevent denormals
+        data = data + 1e-18
+        
         output, self._zi = sosfilt(self._sos, data, axis=0, zi=self._zi)
         return output
     
     def get_frequency_response(self, n_points: int = 1024):
         """
         Calculate the combined frequency response of all EQ bands.
+        Uses logarithmic spacing for better resolution at low frequencies.
         
         Args:
             n_points: Number of frequency points
@@ -275,11 +269,13 @@ class ParametricEQ:
             frequencies: Array of frequencies in Hz
             magnitude_db: Array of magnitude response in dB
         """
+        # Generate logarithmically spaced frequencies from 20Hz to Nyquist
+        freqs = np.logspace(np.log10(20), np.log10(self.samplerate / 2), n_points)
+        
         if self._sos is None:
-            freqs = np.linspace(20, self.samplerate / 2, n_points)
             return freqs, np.zeros(n_points)
         
-        w, h = sosfreqz(self._sos, worN=n_points, fs=self.samplerate)
+        w, h = sosfreqz(self._sos, worN=freqs, fs=self.samplerate)
         magnitude_db = 20 * np.log10(np.abs(h) + 1e-10)
         return w, magnitude_db
     
@@ -295,8 +291,8 @@ class AudioPath:
     """Runtime instance of an audio processing path."""
     config: AudioPathConfig
     eq: ParametricEQ
-    in_idx: object  # slice or list for indexing
-    out_idx: object # slice or list for indexing
+    in_idx: slice | list[int]
+    out_idx: slice | list[int]
 
 class AudioProcessorApp:
     """Main application class for audio processing and visualization."""
@@ -336,6 +332,8 @@ class AudioProcessorApp:
             ))
         
         self.plot_queue = queue.Queue()
+        self.max_input_peaks = np.zeros(INPUT_CHANNELS)
+        self.max_output_peaks = np.zeros(OUTPUT_CHANNELS)
         
         self.stream = sd.Stream(
             device=(self.input_device_id, self.output_device_id),
@@ -414,8 +412,7 @@ class AudioProcessorApp:
         colors = ['b', 'r', 'g', 'm', 'c', 'y']
         for i, p in enumerate(self.paths):
             eq_freqs, eq_mag = p.eq.get_frequency_response(n_points=2048)
-            # Add path gain to the magnitude response
-            eq_mag += p.config.gain_db
+            # Note: gain_db is excluded from visualization as requested
             self.ax_eq.semilogx(eq_freqs, eq_mag, color=colors[i % len(colors)], 
                                linewidth=2, label=p.config.name)
 
@@ -430,7 +427,7 @@ class AudioProcessorApp:
         self.line_spectrum, = self.ax_spec.semilogx(self.x_freqs, np.full(len(self.x_freqs), -100), 'g-', alpha=0.4, label='Live')
         self.line_average, = self.ax_spec.semilogx(self.x_freqs, np.full(len(self.x_freqs), -100), 'y-', linewidth=2, label='Long-term Avg')
         self.ax_spec.set_xlim(20, 20000)
-        self.ax_spec.set_ylim(-60, 0)
+        self.ax_spec.set_ylim(-80, -20)
         self.ax_spec.set_xlabel('Frequency (Hz)')
         self.ax_spec.set_ylabel('Output Level (dB)')
         self.ax_spec.set_title('Live Output Spectrum')
@@ -468,11 +465,8 @@ class AudioProcessorApp:
         
         return self.line_spectrum, self.line_average
 
-    def callback(self, indata, outdata, frames, time, status):
+    def callback(self, indata: np.ndarray, outdata: np.ndarray, frames: int, time, status):
         """Audio stream callback."""
-        if status:
-            # Avoid printing in callback if possible, but keep for debugging
-            pass
         
         # Clear output buffer (fast in NumPy)
         outdata.fill(0)
@@ -483,7 +477,6 @@ class AudioProcessorApp:
             
             # Apply mono mix if requested
             if p.config.mono_mix:
-                # OPTIMIZATION: Faster mono mix for stereo inputs
                 if path_input.shape[1] == 2:
                     path_input = (path_input[:, 0:1] + path_input[:, 1:2]) * 0.5
                 else:
@@ -503,6 +496,10 @@ class AudioProcessorApp:
             # Map to output channels
             outdata[:, p.out_idx] = processed
         
+        # Track peak levels for headroom monitoring
+        self.max_input_peaks = np.maximum(self.max_input_peaks, np.max(np.abs(indata), axis=0))
+        self.max_output_peaks = np.maximum(self.max_output_peaks, np.max(np.abs(outdata), axis=0))
+        
         if ENABLE_VISUALIZATION:
             try:
                 # OPTIMIZATION: Only copy if the queue has space to avoid blocking
@@ -520,6 +517,21 @@ class AudioProcessorApp:
         """Print the current stream latency."""
         if self.stream:
             print(f"Input latency: {self.stream.latency[0]*1000:.2f}ms\tOutput latency: {self.stream.latency[1]*1000:.2f}ms")
+
+    def reset_peaks(self):
+        """Reset the maximum peak trackers."""
+        self.max_input_peaks.fill(0)
+        self.max_output_peaks.fill(0)
+
+    def get_headroom(self):
+        """Return the current headroom in dB for input and output."""
+        in_peaks = np.maximum(self.max_input_peaks, 1e-10)
+        out_peaks = np.maximum(self.max_output_peaks, 1e-10)
+        
+        in_headroom = -20 * np.log10(np.max(in_peaks))
+        out_headroom = -20 * np.log10(np.max(out_peaks))
+        
+        return in_headroom, out_headroom
 
     def start_stream(self):
         """Start the audio stream, print latency, and handle visualization."""
@@ -540,10 +552,50 @@ class MenuBarApp(rumps.App):
         self.processor = processor
         
         self.toggle_button = rumps.MenuItem("Start EQ", callback=self.toggle_eq)
-        self.menu = [self.toggle_button]
+        self.in_headroom_item = rumps.MenuItem("Input Headroom: -- dB")
+        self.out_headroom_item = rumps.MenuItem("Output Headroom: -- dB")
+        self.reset_peaks_button = rumps.MenuItem("Reset Peaks", callback=self.reset_peaks)
+        
+        self.menu = [
+            self.toggle_button,
+            None, # Separator
+            self.in_headroom_item,
+            self.out_headroom_item,
+            self.reset_peaks_button
+        ]
+        
+        # Timer to update headroom display
+        self.timer = rumps.Timer(self.update_headroom, 1.0)
+        self.timer.start()
         
         # Start automatically
         self.toggle_eq(None)
+
+    def update_headroom(self, sender):
+        if self.processor.stream.active:
+            in_hr, out_hr = self.processor.get_headroom()
+            
+            # Update menu items
+            self.in_headroom_item.title = f"Input Headroom: {in_hr:.1f} dB"
+            self.out_headroom_item.title = f"Output Headroom: {out_hr:.1f} dB"
+            
+            # Visual warnings
+            if in_hr <= 0.1:
+                self.in_headroom_item.title = f"INPUT CLIP! ({in_hr:.1f} dB)"
+                self.title = "EQ IN-CLIP"
+            elif out_hr <= 0.1:
+                self.out_headroom_item.title = f"OUTPUT CLIP! ({out_hr:.1f} dB)"
+                self.title = "EQ OUT-CLIP"
+            else:
+                self.title = "EQ ON"
+        else:
+            self.in_headroom_item.title = "Input Headroom: -- dB"
+            self.out_headroom_item.title = "Output Headroom: -- dB"
+            self.title = "EQ"
+
+    def reset_peaks(self, sender):
+        self.processor.reset_peaks()
+        print("Peaks reset.")
 
     def toggle_eq(self, sender):
         if not self.processor.stream.active:
