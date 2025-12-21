@@ -455,12 +455,12 @@ class MenuBarApp(rumps.App):
             # Visual warnings
             if in_hr <= 0.1:
                 self.in_headroom_item.title = f"INPUT CLIP! ({in_hr:.1f} dB)"
-                self.title = "EQ IN-CLIP"
+                self.title = "CLIP IN"
             elif out_hr <= 0.1:
                 self.out_headroom_item.title = f"OUTPUT CLIP! ({out_hr:.1f} dB)"
-                self.title = "EQ OUT-CLIP"
+                self.title = "CLIP OUT"
             else:
-                self.title = "EQ ON"
+                self.title = f"{out_hr:.1f} dB"
         else:
             self.in_headroom_item.title = "Input Headroom: -- dB"
             self.out_headroom_item.title = "Output Headroom: -- dB"
